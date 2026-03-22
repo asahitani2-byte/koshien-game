@@ -8,6 +8,8 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 import re
+import json
+import os
 from datetime import datetime
 
 st.set_page_config(
@@ -149,6 +151,16 @@ def fetch_results():
                         break
     except Exception:
         pass
+
+    # koshien_results.json から手動登録結果を読み込んでマージ（手動優先）
+    try:
+        json_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "koshien_results.json")
+        with open(json_path, "r", encoding="utf-8") as f:
+            saved = json.load(f)
+        saved_results = {int(k): int(v) for k, v in saved.get("results", {}).items()}
+        results = {**results, **saved_results}
+    except Exception as e:
+        st.warning(f"koshien_results.json 読み込みエラー: {e}")
 
     return results
 
