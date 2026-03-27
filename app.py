@@ -96,71 +96,82 @@ def get_prize(rank):
 # 試合結果取得
 # =============================================
 
+JSON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "koshien_results.json")
+
+def load_saved_results() -> dict:
+    """koshien_results.json から手動登録結果を読み込む"""
+    try:
+        with open(JSON_PATH, "r", encoding="utf-8") as f:
+            saved = json.load(f)
+        return {int(k): int(v) for k, v in saved.get("results", {}).items()}
+    except Exception:
+        return {}
+
+def save_results(results: dict):
+    """koshien_results.json へ書き込む"""
+    with open(JSON_PATH, "w", encoding="utf-8") as f:
+        json.dump({"updated": datetime.now().isoformat(),
+                   "results": {str(k): v for k, v in sorted(results.items())}},
+                  f, ensure_ascii=False, indent=2)
+
+def _search_score(text: str, ta: int, tb: int):
+    """テキスト中でチームA vs チームBのスコアを検索し勝者チームIDを返す"""
+    team_a, team_b = TEAMS[ta], TEAMS[tb]
+    for i, pat in enumerate([
+        rf"{re.escape(team_a)}\D{{0,6}}(\d+)[－\-ー](\d+)\D{{0,6}}{re.escape(team_b)}",
+        rf"{re.escape(team_b)}\D{{0,6}}(\d+)[－\-ー](\d+)\D{{0,6}}{re.escape(team_a)}",
+    ]):
+        m = re.search(pat, text)
+        if m:
+            s1, s2 = int(m.group(1)), int(m.group(2))
+            if s1 == s2:
+                continue
+            return (ta if s1 > s2 else tb) if i == 0 else (tb if s1 > s2 else ta)
+    return None
+
 @st.cache_data(ttl=300)  # 5分キャッシュ
 def fetch_results():
-    results = {}
+    # 手動登録結果を最優先で読み込む
+    results = load_saved_results()
 
-    # Wikipedia から取得
+    # Wikipedia テキスト取得
+    wiki_text = ""
     try:
         url = "https://ja.wikipedia.org/wiki/%E7%AC%AC98%E5%9B%9E%E9%81%B8%E6%8A%9C%E9%AB%98%E7%AD%89%E5%AD%A6%E6%A0%A1%E9%87%8E%E7%90%83%E5%A4%A7%E4%BC%9A"
         resp = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-        soup = BeautifulSoup(resp.text, "html.parser")
-        text = soup.get_text()
-
-        for match_id, (ta, tb) in FIRST_ROUND.items():
-            team_a, team_b = TEAMS[ta], TEAMS[tb]
-            # スコアパターン: チームA X-Y チームB または逆
-            patterns = [
-                rf"{re.escape(team_a)}\s*(\d+)[－\-](\d+)\s*{re.escape(team_b)}",
-                rf"{re.escape(team_b)}\s*(\d+)[－\-](\d+)\s*{re.escape(team_a)}",
-            ]
-            for i, pat in enumerate(patterns):
-                m = re.search(pat, text)
-                if m:
-                    s1, s2 = int(m.group(1)), int(m.group(2))
-                    if i == 0:
-                        results[match_id] = ta if s1 > s2 else tb
-                    else:
-                        results[match_id] = tb if s1 > s2 else ta
-                    break
+        wiki_text = BeautifulSoup(resp.text, "html.parser").get_text()
     except Exception:
         pass
 
-    # baseball-channel から補完
+    # baseball-channel テキスト取得
+    bc_text = ""
     try:
         resp = requests.get("https://www.baseballchannel.jp/etc/252405/", timeout=8,
                             headers={"User-Agent": "Mozilla/5.0"})
         if resp.status_code == 200:
-            soup = BeautifulSoup(resp.text, "html.parser")
-            text = soup.get_text()
-            for match_id, (ta, tb) in FIRST_ROUND.items():
-                if match_id in results:
-                    continue
-                team_a, team_b = TEAMS[ta], TEAMS[tb]
-                for pat, winner_if_first in [
-                    (rf"{re.escape(team_a)}\D{{0,10}}(\d+)[－\-](\d+)\D{{0,10}}{re.escape(team_b)}", "a"),
-                    (rf"{re.escape(team_b)}\D{{0,10}}(\d+)[－\-](\d+)\D{{0,10}}{re.escape(team_a)}", "b"),
-                ]:
-                    m = re.search(pat, text)
-                    if m:
-                        s1, s2 = int(m.group(1)), int(m.group(2))
-                        if winner_if_first == "a":
-                            results[match_id] = ta if s1 > s2 else tb
-                        else:
-                            results[match_id] = tb if s1 > s2 else ta
-                        break
+            bc_text = BeautifulSoup(resp.text, "html.parser").get_text()
     except Exception:
         pass
 
-    # koshien_results.json から手動登録結果を読み込んでマージ（手動優先）
-    try:
-        json_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "koshien_results.json")
-        with open(json_path, "r", encoding="utf-8") as f:
-            saved = json.load(f)
-        saved_results = {int(k): int(v) for k, v in saved.get("results", {}).items()}
-        results = {**results, **saved_results}
-    except Exception as e:
-        st.warning(f"koshien_results.json 読み込みエラー: {e}")
+    # 全試合を順番にスクレイピング（1回戦→2回戦→…と進める）
+    # まず1回戦の対戦カードは固定
+    all_matchups = dict(FIRST_ROUND)  # {mid: (ta, tb)}
+
+    # 2回戦以降はその時点の結果から対戦カードを動的構築
+    for mid in sorted(BRACKET.keys()):
+        prev_a, prev_b = BRACKET[mid]
+        wa = results.get(prev_a)
+        wb = results.get(prev_b)
+        if wa and wb:
+            all_matchups[mid] = (wa, wb)
+
+    # 各試合をスクレイピング（手動登録済みはスキップ）
+    for mid, (ta, tb) in sorted(all_matchups.items()):
+        if mid in results:
+            continue
+        winner = _search_score(wiki_text, ta, tb) or _search_score(bc_text, ta, tb)
+        if winner:
+            results[mid] = winner
 
     return results
 
@@ -471,3 +482,77 @@ with st.expander("💰 賞金テーブル"):
     st.dataframe(prize_df, use_container_width=False, hide_index=True)
 
 st.caption("データは画像より入力。誤りがある場合はお知らせください。")
+
+st.divider()
+
+# =============================================
+# 管理者：結果手動入力
+# =============================================
+
+with st.expander("🔧 管理者：結果を手動入力"):
+    pwd = st.text_input("管理者コード", type="password", key="admin_pwd")
+    if pwd == "koshien2026":
+        st.success("管理者モード")
+
+        saved = load_saved_results()
+
+        # 入力対象の試合一覧（対戦カードが確定しているもの）
+        all_matchups = dict(FIRST_ROUND)
+        for mid in sorted(BRACKET.keys()):
+            prev_a, prev_b = BRACKET[mid]
+            wa = results.get(prev_a)
+            wb = results.get(prev_b)
+            if wa and wb:
+                all_matchups[mid] = (wa, wb)
+
+        # 試合選択
+        match_options = {
+            mid: f"試合{mid} {MATCH_SCHEDULE.get(mid,'')} ({ROUND_NAMES.get(mid,'')}) "
+                 f"　{TEAMS[ta]} vs {TEAMS[tb]}"
+                 + (f"　→ 登録済: {TEAMS[results[mid]]}" if mid in results else "")
+            for mid, (ta, tb) in sorted(all_matchups.items())
+        }
+
+        selected_mid = st.selectbox(
+            "試合を選択",
+            options=list(match_options.keys()),
+            format_func=lambda x: match_options[x],
+        )
+
+        if selected_mid:
+            ta, tb = all_matchups[selected_mid]
+            winner_choice = st.radio(
+                "勝者チーム",
+                options=[ta, tb],
+                format_func=lambda x: TEAMS[x],
+                horizontal=True,
+            )
+
+            col_save, col_del = st.columns(2)
+            with col_save:
+                if st.button("✅ 結果を保存", use_container_width=True):
+                    saved[selected_mid] = winner_choice
+                    save_results(saved)
+                    st.cache_data.clear()
+                    st.success(f"試合{selected_mid}の結果を保存しました：{TEAMS[winner_choice]}")
+                    st.rerun()
+            with col_del:
+                if selected_mid in saved:
+                    if st.button("🗑 この試合の結果を削除", use_container_width=True):
+                        del saved[selected_mid]
+                        save_results(saved)
+                        st.cache_data.clear()
+                        st.warning(f"試合{selected_mid}の結果を削除しました")
+                        st.rerun()
+
+        # 登録済み一覧
+        st.markdown("**現在の登録済み結果**")
+        if saved:
+            for mid, winner_id in sorted(saved.items()):
+                ta, tb = all_matchups.get(mid, (winner_id, winner_id))
+                loser = tb if winner_id == ta else ta
+                st.write(f"試合{mid} ({ROUND_NAMES.get(mid,'')})　◯ **{TEAMS[winner_id]}** vs {TEAMS.get(loser, '?')} ✕")
+        else:
+            st.info("登録なし")
+    elif pwd:
+        st.error("コードが違います")
