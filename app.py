@@ -192,8 +192,10 @@ MATCH_DEFS = {
     44: (("W", 38), ("W", 39)),  # 健大高崎 vs 有明
     45: (("W", 40), ("W", 41)),  # 花巻東 vs 横浜
     # ---- 準決勝（試合46〜47）----
-    46: (("W", 42), ("W", 43)),
-    47: (("W", 44), ("W", 45)),
+    # 準々決勝と同じく抽選のため要確認。実際の抽選結果に合わせて修正（2026-08-18）:
+    # 横浜vs智辯和歌山、健大高崎vs天理
+    46: (("W", 45), ("W", 43)),  # 横浜 vs 智辯和歌山
+    47: (("W", 44), ("W", 42)),  # 健大高崎 vs 天理
     # ---- 決勝（試合48）----
     48: (("W", 46), ("W", 47)),
 }
@@ -343,13 +345,22 @@ def build_matches(results):
         matches[mid] = {"teams": (pair[0], pair[1]), "winner": results.get(mid)}
     return matches
 
+def match_multiplier(mid):
+    """準々決勝・準決勝は加点2倍、決勝は3倍（2026-08-18ルール追加）"""
+    if mid == 48:
+        return 3
+    if 42 <= mid <= 47:
+        return 2
+    return 1
+
 def calc_totals(matches):
     totals = {n: 0 for n in SCORES}
     for mid in sorted(matches):
         w = matches[mid]["winner"]
         if w:
+            mult = match_multiplier(mid)
             for n in SCORES:
-                totals[n] += SCORES[n][w - 1]
+                totals[n] += SCORES[n][w - 1] * mult
     return totals
 
 def calc_expected(matches, totals):
@@ -358,8 +369,9 @@ def calc_expected(matches, totals):
         w = matches[mid]["winner"]
         ta, tb = matches[mid]["teams"]
         if w is None and ta and tb:
+            mult = match_multiplier(mid)
             for n in SCORES:
-                exp_add[n] += (SCORES[n][ta-1] + SCORES[n][tb-1]) / 2.0
+                exp_add[n] += (SCORES[n][ta-1] + SCORES[n][tb-1]) / 2.0 * mult
     return {n: totals[n] + exp_add[n] for n in SCORES}
 
 # =============================================
